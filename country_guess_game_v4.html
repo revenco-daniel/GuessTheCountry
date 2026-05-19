@@ -1,0 +1,235 @@
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="style.css">
+
+<h2 class="page-title">Ghicește Țara</h2>
+<div id="app">
+  <div class="scores card">
+    <div class="score-card"><div class="score-label">Scor curent</div><div class="score-val" id="score">0</div></div>
+    <div class="score-card"><div class="score-label">Scor maxim</div><div class="score-val" id="best">0</div></div>
+  </div>
+  <div id="globe-card">
+    <div id="globe-wrap">
+      <div id="loading-msg">Se încarcă harta...</div>
+      <svg id="map" viewBox="0 0 960 500" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="overlay">
+        <div id="overlay-card">
+          <h2>Ghicește Țara</h2>
+          <p>O țară va fi evidențiată pe hartă.<br>Folosește butonul "Zoom" pentru a mări zona dacă e greu de văzut.</p>
+          <button id="start-btn">▶ Start</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="card" id="question-card" style="display:none">
+    <div id="question"></div>
+    <div id="hint-bar"></div>
+  </div>
+  <div id="controls-row" class="card" style="display:none">
+    <div id="answer-wrap">
+      <div class="input-container">
+        <input id="answer" type="text" placeholder="Scrie numele țării..." autocomplete="off" />
+        <div class="suggestions" id="suggestions" style="display:none"></div>
+      </div>
+      <button id="submit-btn">OK</button>
+    </div>
+    <button id="zoom-btn" title="Zoom pe țara marcată"><i class="ti ti-zoom-in" aria-hidden="true"></i> Zoom</button>
+  </div>
+  <div id="feedback" class="card" style="display:none"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+<script src="tari.js"></script>
+<script>
+
+const idToCountry = {};
+COUNTRIES.forEach(c => { idToCountry[c.id] = c; });
+
+let remaining = [], current = null, score = 0, best = 0, gameActive = false, sugIdx = -1;
+let allFeatures = [];
+let zoomed = false;
+let currentTransform = d3.zoomIdentity;
+
+const svgEl = document.getElementById("map");
+const svg = d3.select(svgEl);
+const W = 960, H = 500;
+const projection = d3.geoNaturalEarth1().scale(153).translate([W/2, H/2]);
+const pathGen = d3.geoPath().projection(projection);
+
+const zoomBehavior = d3.zoom()
+  .scaleExtent([1, 20])
+  .translateExtent([[0,0],[W,H]])
+  .on("zoom", (event) => {
+    currentTransform = event.transform;
+    svg.select("#map-g").attr("transform", event.transform);
+  });
+
+svg.call(zoomBehavior);
+
+async function loadMap() {
+  try {
+    const res = await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+    const world = await res.json();
+    const countries = topojson.feature(world, world.objects.countries);
+    allFeatures = countries.features;
+    document.getElementById("loading-msg").style.display = "none";
+
+    svg.append("rect").attr("width", W).attr("height", H).attr("fill","#cce4f0");
+
+    const g = svg.append("g").attr("id","map-g");
+    g.append("path").datum({type:"Sphere"}).attr("d",pathGen).attr("fill","#cce4f0").attr("stroke","none");
+    g.append("g").attr("id","cg")
+      .selectAll("path").data(countries.features).enter().append("path")
+      .attr("data-id", d => +d.id)
+      .attr("d", pathGen)
+      .attr("fill","#e8e4dc")
+      .attr("stroke","#aaa")
+      .attr("stroke-width","0.4");
+  } catch(e) {
+    document.getElementById("loading-msg").textContent = "Eroare la încărcarea hărții.";
+  }
+}
+
+function highlight(c) {
+  svg.selectAll("#cg path").attr("fill", function() {
+    return +d3.select(this).attr("data-id") === c.id ? "#EF9F27" : "#e8e4dc";
+  });
+}
+
+function clearHL() { svg.selectAll("#cg path").attr("fill","#e8e4dc"); }
+
+function zoomToCountry() {
+  if (!current) return;
+  const feat = allFeatures.find(f => +f.id === current.id);
+  if (!feat) return;
+
+  const [[x0,y0],[x1,y1]] = pathGen.bounds(feat);
+  const dx = x1 - x0, dy = y1 - y0;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+
+  const pad = 80;
+  const scale = Math.min(8, 0.9 / Math.max(dx / (W - pad*2), dy / (H - pad*2)));
+  const tx = W/2 - scale * cx;
+  const ty = H/2 - scale * cy;
+
+  svg.transition().duration(600)
+    .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+
+  zoomed = true;
+  const btn = document.getElementById("zoom-btn");
+  btn.classList.add("active");
+  btn.innerHTML = '<i class="ti ti-zoom-out" aria-hidden="true"></i> Reset';
+}
+
+function resetZoom() {
+  svg.transition().duration(500)
+    .call(zoomBehavior.transform, d3.zoomIdentity);
+  zoomed = false;
+  const btn = document.getElementById("zoom-btn");
+  btn.classList.remove("active");
+  btn.innerHTML = '<i class="ti ti-zoom-in" aria-hidden="true"></i> Zoom';
+}
+
+document.getElementById("zoom-btn").addEventListener("click", () => {
+  if (zoomed) resetZoom(); else zoomToCountry();
+});
+
+function normalize(s) {
+  return (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/['-]/g,"").trim();
+}
+
+function shuffle(a) {
+  for (let i=a.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+}
+
+function startGame() {
+  remaining = [...COUNTRIES]; shuffle(remaining);
+  score = 0; document.getElementById("score").textContent = "0";
+  gameActive = true; nextRound();
+}
+
+function nextRound() {
+  document.getElementById("feedback").style.display = "none";
+  document.getElementById("feedback").textContent = "";
+  document.getElementById("question-card").style.display = "flex";
+  document.getElementById("answer").value = "";
+  hideSug();
+  resetZoom();
+  if (!remaining.length) { endGame(true); return; }
+  current = remaining.pop();
+  highlight(current);
+  document.getElementById("question").textContent = "Ce țară este evidențiată pe hartă?";
+  document.getElementById("hint-bar").textContent = (remaining.length+1) + " / " + COUNTRIES.length;
+}
+
+function checkAnswer() {
+  if (!gameActive||!current) return;
+  const inp = normalize(document.getElementById("answer").value);
+  hideSug();
+  const allNames = [current.ro, current.en, ...current.alt].map(normalize);
+  if (allNames.includes(inp)) {
+    score++; if (score>best){best=score;document.getElementById("best").textContent=best;}
+    document.getElementById("score").textContent = score;
+    const fb = document.getElementById("feedback");
+    fb.textContent = "✓ Corect! " + current.ro; fb.className = "fb-correct"; fb.style.display = "block";
+    setTimeout(nextRound, 900);
+  } else { endGame(false); }
+}
+
+function endGame(completed) {
+  gameActive = false; clearHL(); resetZoom();
+  document.getElementById("question").textContent = "";
+  document.getElementById("hint-bar").textContent = "";
+  document.getElementById("question-card").style.display = "none";
+  document.getElementById("controls-row").style.display = "none";
+  document.getElementById("feedback").textContent = "";
+  document.getElementById("feedback").style.display = "none";
+  const wrong = !completed && current ? `Răspuns corect: <strong>${current.ro}</strong><br>` : "";
+  const rec = score>0&&score===best&&!completed?" 🏆 Record nou!":"";
+  document.getElementById("overlay-card").innerHTML = `<h2>${completed?"Felicitări! 🎉":"Game Over"}</h2><p>${wrong}Scor final: <strong>${score}</strong>${rec}</p><button onclick="doRestart()">▶ Joacă din nou</button>`;
+  document.getElementById("overlay").style.display = "flex";
+}
+
+function doRestart() {
+  document.getElementById("overlay").style.display = "none";
+  document.getElementById("controls-row").style.display = "flex";
+  startGame();
+}
+
+function showSug(val) {
+  const box = document.getElementById("suggestions");
+  if (!val) { box.style.display="none"; return; }
+  const n = normalize(val);
+  const matches = COUNTRIES
+    .filter(c => normalize(c.ro).startsWith(n) || c.alt.some(a => normalize(a).startsWith(n)))
+    .map(c => c.ro).slice(0,8);
+  if (!matches.length) { box.style.display="none"; return; }
+  box.innerHTML = matches.map(m=>`<div class="sug-item" data-val="${m}">${m}</div>`).join("");
+  box.style.display="block"; sugIdx=-1;
+  box.querySelectorAll(".sug-item").forEach(el => {
+    el.addEventListener("mousedown", e => {
+      document.getElementById("answer").value = e.target.dataset.val;
+      hideSug(); checkAnswer();
+    });
+  });
+}
+
+function hideSug() { document.getElementById("suggestions").style.display="none"; sugIdx=-1; }
+
+document.getElementById("answer").addEventListener("input", e => showSug(e.target.value));
+document.getElementById("answer").addEventListener("keydown", e => {
+  const items = document.getElementById("suggestions").querySelectorAll(".sug-item");
+  if (e.key==="ArrowDown"){sugIdx=Math.min(sugIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle("active",i===sugIdx));e.preventDefault();}
+  else if(e.key==="ArrowUp"){sugIdx=Math.max(sugIdx-1,-1);items.forEach((el,i)=>el.classList.toggle("active",i===sugIdx));e.preventDefault();}
+  else if(e.key==="Enter"){if(sugIdx>=0&&items[sugIdx]){document.getElementById("answer").value=items[sugIdx].dataset.val;hideSug();checkAnswer();}else checkAnswer();}
+  else if(e.key==="Escape") hideSug();
+});
+document.getElementById("submit-btn").addEventListener("click", checkAnswer);
+document.getElementById("start-btn").addEventListener("click", () => {
+  document.getElementById("overlay").style.display = "none";
+  document.getElementById("controls-row").style.display = "flex";
+  startGame();
+});
+
+loadMap();
+</script>
